@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <title>Simulador de Paletização 3D - Múltiplas Camadas</title>
+ 
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+ 
+  <!-- Three.js, OrbitControls e Tween.js -->
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+ 
+  <style>
+    body { margin: 0; overflow: hidden; background-color: #0f172a; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+    #ui-panel { position: absolute; z-index: 10; top: 20px; left: 20px; max-height: 90vh; display: flex; flex-direction: column; }
+    @keyframes flashError { 0%, 100% { background-color: rgba(239, 68, 68, 0.2); } 50% { background-color: rgba(239, 68, 68, 0.6); } }
+    .error-bg { animation: flashError 1.5s infinite; }
+  </style>
+</head>
+<body class="text-slate-100">
+ 
+  <!-- Painel de Controlos -->
+  <div id="ui-panel" class="w-80 bg-slate-900/95 backdrop-blur-md p-5 rounded-xl border border-slate-700 shadow-2xl space-y-4">
+    <h1 class="text-lg font-bold text-blue-400 border-b border-slate-700 pb-2">Linha de Produção 3D</h1>
+ 
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs font-semibold text-slate-400 uppercase">Padrão da Palete</label>
+        <select id="palletType" class="w-full bg-slate-800 border border-slate-600 rounded-lg p-2 text-sm mt-1">
+          <option value="PBR">PBR Brasil (1.20 x 1.00 m)</option>
+          <option value="EUR">Euro EPAL (1.20 x 0.80 m)</option>
+        </select>
+      </div>
+ 
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-[10px] text-slate-400 block mb-1">Altura Máx (Metros)</label>
+          <input type="number" id="maxHeight" value="1.5" step="0.1" class="w-full bg-slate-800 border border-slate-600 rounded-lg p-2 text-sm text-center">
+        </div>
+        <div>
+          <label class="text-[10px] text-slate-400 block mb-1">Peso Máx (kg)</label>
+          <input type="number" id="maxWeight" value="500" step="50" class="w-full bg-slate-800 border border-slate-600 rounded-lg p-2 text-sm text-center">
+        </div>
+      </div>
+      <p class="text-[10px] text-slate-500 leading-tight">Braço Industrial corrigido para empilhamento vertical (múltiplas camadas).</p>
+    </div>
+ 
+    <div class="flex gap-2">
+      <button id="btnStart" class="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-2 rounded-lg text-sm transition-colors">Iniciar Produção</button>
+      <button id="btnStop" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-2 rounded-lg text-sm transition-colors" disabled>Parar</button>
+    </div>
+ 
+    <!-- Resumo do Lote Atual -->
+    <div class="text-xs bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1">
+      <div class="text-blue-400 font-bold mb-1 border-b border-slate-800 pb-1">Estado do Lote Atual</div>
+      <div class="flex justify-between"><span>Dimensões da Caixa:</span> <strong id="currentBoxSize">-</strong></div>
+      <div class="flex justify-between"><span>Caixas por Camada:</span> <strong id="boxesPerLayerDisplay" class="text-blue-300">0</strong></div>
+      <div class="flex justify-between"><span>Caixas Empilhadas:</span> <strong id="currentBoxes">0</strong></div>
+      <div class="flex justify-between"><span>Peso Acumulado:</span> <strong id="currentWeight">0 kg</strong></div>
+      <div class="flex justify-between"><span>Altura Acumulada:</span> <strong id="currentHeight" class="text-emerald-400">0.00 m</strong></div>
+      <div class="flex justify-between pt-1 border-t border-slate-800 mt-1">
+          <span class="text-slate-400">Caixas Restantes (Est.):</span> <strong id="remainingBoxes" class="text-yellow-400">0</strong>
+      </div>
+    </div>
+ 
+    <!-- Separador Lotes Prontos -->
+    <div class="flex-1 flex flex-col min-h-[150px]">
+      <h2 class="text-sm font-bold text-slate-300 mb-2">Lotes Prontos</h2>
+      <div id="readyBatches" class="flex-1 overflow-y-auto bg-slate-800/50 rounded-lg p-2 border border-slate-700 space-y-2 text-xs text-slate-400">
+      </div>
+    </div>
+  </div>
+ 
+  <div id="canvas-container"></div>
+ 
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      try {
+        initApp();
+      } catch (err) {
+        console.error("Erro crítico de renderização WebGL:", err);
+        alert("Ocorreu um erro a carregar o 3D: " + err.message);
+      }
+    });
+ 
+    let scene, camera, renderer, controls, activeBatchGroup;
+    let texturesBox;
+ 
+    let isProducing = false;
+    let isPausedError = false;
+    let isAnimating = false;
+    let productionTimer = null;
+ 
+    let palletDim = { l: 12, w: 10 };
+    let maxHeight = 1.5;
+    let maxWeight = 500;
+   
+    const PALLET_SURFACE_Y = 1.4;
+    const CONVEYOR_HEIGHT = 1.4;
+ 
+    let currentPalletIndex = 0;
+    let currentBoxDim = { l: 0, w: 0, h: 0 };
+    let boxesInCurrentPallet = 0;
+    let currentPalletWeight = 0;
+    let currentPalletHeightMeters = 0;
+    let currentLayerLayout = [];
+ 
+    // Estrutura do Novo Robô Articulado de Precisão (6-DOF Style)
+    let robotOrigin = new THREE.Vector3(0, 0, -15);
+    const BASE_H = 8;
+    const L1_LEN = 16;
+    const L2_LEN = 15;
+    const TOOL_LEN = 4.5;
+   
+    let baseGroup, shoulderGroup, elbowGroup, wristGroup, effector;
+    let effectorProxy = { x: 18, y: 15, z: -5 };
+    const CONVEYOR_POS = { x: 18, z: -5 };
+ 
+    function createCartonTextures() {
+      const makeFace = (kind) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256; canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, 256, 256);
+        grad.addColorStop(0, '#d7b17c'); grad.addColorStop(.52, '#c99b64'); grad.addColorStop(1, '#b9834e');
+        ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
+        ctx.globalAlpha = .13; ctx.strokeStyle = '#74491f'; ctx.lineWidth = 1;
+        for (let y = 8; y < 256; y += 9) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y + 3); ctx.stroke(); }
+        ctx.globalAlpha = 1;
+       
+        if (kind === 'top') {
+          ctx.fillStyle = '#b98248'; ctx.fillRect(103, 0, 50, 256);
+          ctx.strokeStyle = '#9a6c3d'; ctx.lineWidth = 2; ctx.strokeRect(12, 12, 232, 232);
+        } else if (kind === 'side') {
+          ctx.fillStyle = '#f0e8d8'; ctx.fillRect(146, 30, 91, 78);
+          ctx.fillStyle = '#463321'; ctx.font = 'bold 10px Arial'; ctx.fillText('CARGA', 154, 47); ctx.fillText('PALETIZADA', 154, 60);
+          ctx.fillStyle = '#74502d'; ctx.font = 'bold 13px Arial'; ctx.textAlign = 'center'; ctx.fillText('ESTE LADO P/ CIMA', 128, 219);
+        } else {
+          ctx.strokeStyle = '#9b7045'; ctx.lineWidth = 2; ctx.strokeRect(10, 10, 236, 236);
+        }
+ 
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.anisotropy = 4;
+        return texture;
+      };
+      return { side: makeFace('side'), top: makeFace('top'), bottom: makeFace('bottom') };
+    }
+ 
+    function initApp() {
+      const container = document.getElementById('canvas-container');
+     
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1e293b);
+      scene.fog = new THREE.Fog(0x1e293b, 40, 100);
+     
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(24, 30, 38);
+     
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      container.appendChild(renderer.domElement);
+ 
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 5, 0);
+ 
+      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(20, 50, 20);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.width = 1024;
+      dirLight.shadow.mapSize.height = 1024;
+      scene.add(dirLight);
+     
+      const grid = new THREE.GridHelper(200, 100, 0x334155, 0x0f172a);
+      grid.position.y = -0.01;
+      scene.add(grid);
+ 
+      buildRobot();
+      buildConveyor();
+ 
+      activeBatchGroup = new THREE.Group();
+      scene.add(activeBatchGroup);
+     
+      texturesBox = createCartonTextures();
+      createPalletBase();
+     
+      // Chamada inicial para estabilizar o braço
+      applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z);
+ 
+      animate();
+ 
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+ 
+      document.getElementById('btnStart').addEventListener('click', startProduction);
+      document.getElementById('btnStop').addEventListener('click', stopProduction);
+    }
+ 
+    // MONTAGEM CORRETA DO ROBÔ ARTICULADO
+    function buildRobot() {
+      const robMat = new THREE.MeshStandardMaterial({color: 0xeab308, roughness: 0.3, metalness: 0.1}); // Amarelo
+      const darkMat = new THREE.MeshStandardMaterial({color: 0x334155, roughness: 0.5}); // Cinzento escuro
+      const metalMat = new THREE.MeshStandardMaterial({color: 0x94a3b8, roughness: 0.2, metalness: 0.8}); // Metal
+     
+      baseGroup = new THREE.Group();
+      baseGroup.position.copy(robotOrigin);
+      scene.add(baseGroup);
+ 
+      const baseMesh = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 4.5, BASE_H, 32), darkMat);
+      baseMesh.position.y = BASE_H / 2;
+      baseMesh.castShadow = true;
+      baseGroup.add(baseMesh);
+ 
+      shoulderGroup = new THREE.Group();
+      shoulderGroup.position.set(0, BASE_H, 0);
+      baseGroup.add(shoulderGroup);
+ 
+      const shoulderJoint = new THREE.Mesh(new THREE.CylinderGeometry(2.5, 2.5, 3.5, 32), robMat);
+      shoulderJoint.rotation.x = Math.PI / 2;
+      shoulderJoint.castShadow = true;
+      shoulderGroup.add(shoulderJoint);
+ 
+      const l1Mesh = new THREE.Mesh(new THREE.BoxGeometry(L1_LEN, 2, 2.5), robMat);
+      l1Mesh.position.set(L1_LEN / 2, 0, 0);
+      l1Mesh.castShadow = true;
+      shoulderGroup.add(l1Mesh);
+ 
+      elbowGroup = new THREE.Group();
+      elbowGroup.position.set(L1_LEN, 0, 0);
+      shoulderGroup.add(elbowGroup);
+ 
+      const elbowJoint = new THREE.Mesh(new THREE.CylinderGeometry(2, 2, 3, 32), darkMat);
+      elbowJoint.rotation.x = Math.PI / 2;
+      elbowJoint.castShadow = true;
+      elbowGroup.add(elbowJoint);
+ 
+      const l2Mesh = new THREE.Mesh(new THREE.BoxGeometry(L2_LEN, 1.6, 2), robMat);
+      l2Mesh.position.set(L2_LEN / 2, 0, 0);
+      l2Mesh.castShadow = true;
+      elbowGroup.add(l2Mesh);
+ 
+      wristGroup = new THREE.Group();
+      wristGroup.position.set(L2_LEN, 0, 0);
+      elbowGroup.add(wristGroup);
+ 
+      const wristJoint = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 2.5, 32), darkMat);
+      wristJoint.rotation.x = Math.PI / 2;
+      wristJoint.castShadow = true;
+      wristGroup.add(wristJoint);
+ 
+      const toolMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, TOOL_LEN, 16), metalMat);
+      toolMesh.rotation.z = Math.PI / 2;
+      toolMesh.position.set(TOOL_LEN / 2, 0, 0);
+      toolMesh.castShadow = true;
+      wristGroup.add(toolMesh);
+ 
+      effector = new THREE.Group();
+      effector.position.set(TOOL_LEN, 0, 0);
+      wristGroup.add(effector);
+ 
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.5, 2.5), darkMat);
+      plate.castShadow = true;
+      effector.add(plate);
+ 
+      const cupGeom = new THREE.CylinderGeometry(0.3, 0.4, 0.4, 16);
+      cupGeom.rotateZ(Math.PI / 2);
+      const cupMat = new THREE.MeshStandardMaterial({color: 0x0284c7});
+      const cups = [[-0.8, -0.8], [0.8, -0.8], [-0.8, 0.8], [0.8, 0.8]];
+     
+      cups.forEach(pos => {
+        const cup = new THREE.Mesh(cupGeom, cupMat);
+        cup.position.set(0.3, pos[0], pos[1]);
+        effector.add(cup);
+      });
+    }
+ 
+    function buildConveyor() {
+      const convMat = new THREE.MeshStandardMaterial({color: 0x475569, roughness: 0.8});
+      const conveyor = new THREE.Mesh(new THREE.BoxGeometry(30, CONVEYOR_HEIGHT, 6), convMat);
+      conveyor.position.set(CONVEYOR_POS.x + 10, CONVEYOR_HEIGHT / 2, CONVEYOR_POS.z);
+      conveyor.castShadow = true; conveyor.receiveShadow = true;
+      scene.add(conveyor);
+    }
+ 
+    // ALGORITMO CINEMÁTICO
+    function applyIK(tx, ty, tz) {
+        let dx = tx - robotOrigin.x;
+        let dz = tz - robotOrigin.z;
+       
+        let yaw = -Math.atan2(dz, dx);
+        baseGroup.rotation.y = yaw;
+ 
+        let r = Math.sqrt(dx*dx + dz*dz);
+        let dy = ty - robotOrigin.y - BASE_H;
+       
+        let targetR = r;
+        let targetY = dy + TOOL_LEN;
+ 
+        let d = Math.sqrt(targetR*targetR + targetY*targetY);
+       
+        if (d >= L1_LEN + L2_LEN) d = L1_LEN + L2_LEN - 0.001;
+        if (d <= Math.abs(L1_LEN - L2_LEN)) d = Math.abs(L1_LEN - L2_LEN) + 0.001;
+ 
+        let alpha = Math.acos((L1_LEN*L1_LEN + d*d - L2_LEN*L2_LEN) / (2 * L1_LEN * d));
+        let beta = Math.acos((L1_LEN*L1_LEN + L2_LEN*L2_LEN - d*d) / (2 * L1_LEN * L2_LEN));
+        let gamma = Math.atan2(targetY, targetR);
+ 
+        let theta1 = gamma + alpha;
+        let theta2 = Math.PI - beta;
+ 
+        shoulderGroup.rotation.z = theta1;
+        elbowGroup.rotation.z = -theta2;
+ 
+        let globalL2 = theta1 - theta2;
+        wristGroup.rotation.z = -Math.PI / 2 - globalL2;
+    }
+ 
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      if(!isPausedError && typeof TWEEN !== 'undefined') {
+          TWEEN.update();
+      }
+      renderer.render(scene, camera);
+    }
+ 
+    function createPalletBase() {
+      const pGroup = new THREE.Group();
+      const palletMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 });
+      const l = palletDim.l; const w = palletDim.w;
+      const plankH = 0.2; const plankW = 1.2;
+      const stringerH = 1.0; const stringerW = 1.0;
+ 
+      for(let i=0; i<3; i++) {
+        const xPos = -l/2 + stringerW/2 + i * ((l - stringerW) / 2);
+        const stringer = new THREE.Mesh(new THREE.BoxGeometry(stringerW, stringerH, w), palletMat);
+        stringer.position.set(xPos, plankH + (stringerH/2), 0);
+        stringer.castShadow = true; stringer.receiveShadow = true; pGroup.add(stringer);
+      }
+      for(let i=0; i<7; i++) {
+        const zPos = -w/2 + plankW/2 + i * ((w - plankW) / 6);
+        const board = new THREE.Mesh(new THREE.BoxGeometry(l, plankH, plankW), palletMat);
+        board.position.set(0, plankH + stringerH + (plankH/2), zPos);
+        board.castShadow = true; board.receiveShadow = true; pGroup.add(board);
+      }
+      for(let i=0; i<3; i++) {
+        const zPos = -w/2 + plankW/2 + i * ((w - plankW) / 2);
+        const board = new THREE.Mesh(new THREE.BoxGeometry(l, plankH, plankW), palletMat);
+        board.position.set(0, plankH/2, zPos);
+        board.castShadow = true; board.receiveShadow = true; pGroup.add(board);
+      }
+      activeBatchGroup.add(pGroup);
+    }
+ 
+    function calculateBestLayout(pL, pW, bL, bW) {
+      let bestLayout = [];
+      let maxAreaCovered = 0;
+      function evaluatePattern(palletLength, palletWidth) {
+        let options = [];
+        for (let nx1 = 0; nx1 <= Math.floor(palletLength / bL); nx1++) {
+          for (let nz1 = 0; nz1 <= Math.floor(palletWidth / bW); nz1++) {
+            let remX = palletLength - (nx1 * bL);
+            let nx2 = Math.floor(remX / bW);
+            let nz2 = Math.floor(palletWidth / bL);
+            options.push(buildPositions(nx1, nz1, bL, bW, false, 0, 0, nx2, nz2, bW, bL, true, nx1 * bL, 0, palletLength, palletWidth));
+          }
+        }
+        for (let nx1 = 0; nx1 <= Math.floor(palletLength / bL); nx1++) {
+          for (let nz1 = 0; nz1 <= Math.floor(palletWidth / bW); nz1++) {
+            let remZ = palletWidth - (nz1 * bW);
+            let nx2 = Math.floor(palletLength / bW);
+            let nz2 = Math.floor(remZ / bL);
+            options.push(buildPositions(nx1, nz1, bL, bW, false, 0, 0, nx2, nz2, bW, bL, true, 0, nz1 * bW, palletLength, palletWidth));
+          }
+        }
+        options.push(buildPositions(Math.floor(palletLength / bL), Math.floor(palletWidth / bW), bL, bW, false, 0, 0, 0, 0, 0, 0, false, 0, 0, palletLength, palletWidth));
+        options.push(buildPositions(Math.floor(palletLength / bW), Math.floor(palletWidth / bL), bW, bL, true, 0, 0, 0, 0, 0, 0, false, 0, 0, palletLength, palletWidth));
+        return options;
+      }
+ 
+      function buildPositions(nx1, nz1, w1, l1, rot1, startX1, startZ1, nx2, nz2, w2, l2, rot2, startX2, startZ2, pLength, pWidth) {
+        let rawLayout = [];
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (let i = 0; i < nx1; i++) {
+          for (let j = 0; j < nz1; j++) {
+            let x = startX1 + i * w1, z = startZ1 + j * l1;
+            rawLayout.push({ x, z, w: w1, l: l1, rotated: rot1 });
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x + w1);
+            minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z + l1);
+          }
+        }
+        for (let i = 0; i < nx2; i++) {
+          for (let j = 0; j < nz2; j++) {
+            let x = startX2 + i * w2, z = startZ2 + j * l2;
+            rawLayout.push({ x, z, w: w2, l: l2, rotated: rot2 });
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x + w2);
+            minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z + l2);
+          }
+        }
+        if (rawLayout.length === 0) return [];
+        let offsetX = (pLength - (maxX - minX)) / 2 - minX;
+        let offsetZ = (pWidth - (maxZ - minZ)) / 2 - minZ;
+        return rawLayout.map(item => ({ cx: item.x + offsetX + item.w / 2, cz: item.z + offsetZ + item.l / 2, rotated: item.rotated }));
+      }
+ 
+      evaluatePattern(pL, pW).forEach(layout => {
+        let coveredArea = layout.length * (bL * bW);
+        if (coveredArea > maxAreaCovered) { maxAreaCovered = coveredArea; bestLayout = layout; }
+      });
+      return bestLayout;
+    }
+ 
+    function generateRandomBoxSize() {
+      const randomDim = () => (Math.floor(Math.random() * 4) + 2.5);
+      let l, w;
+      do { l = randomDim(); w = randomDim(); } while (l > palletDim.l || w > palletDim.w);
+      currentBoxDim = { l, w, h: randomDim() };
+      currentLayerLayout = calculateBestLayout(palletDim.l, palletDim.w, currentBoxDim.l, currentBoxDim.w);
+      document.getElementById('currentBoxSize').innerText = `${(l*10).toFixed(0)} x ${(w*10).toFixed(0)} x ${(currentBoxDim.h*10).toFixed(0)} cm`;
+      document.getElementById('boxesPerLayerDisplay').innerText = currentLayerLayout.length;
+      document.getElementById('currentHeight').innerText = "0.00 m";
+      updateEstimates();
+    }
+ 
+    function updateEstimates() {
+        if (currentLayerLayout.length === 0) return;
+        let estLayers = Math.floor(((maxHeight * 10) - PALLET_SURFACE_Y) / currentBoxDim.h);
+        let maxBoxesH = estLayers * currentLayerLayout.length;
+        let avgWeight = boxesInCurrentPallet === 0 ? 17.5 : (currentPalletWeight / boxesInCurrentPallet);
+        let maxBoxesW = Math.floor(maxWeight / avgWeight);
+        let remaining = Math.max(0, Math.min(maxBoxesH, maxBoxesW) - boxesInCurrentPallet);
+        document.getElementById('remainingBoxes').innerText = remaining;
+    }
+ 
+    function processNextBox() {
+      if (!isProducing || isPausedError || isAnimating) return;
+     
+      const boxesPerLayer = currentLayerLayout.length;
+      if(boxesPerLayer === 0) { finishPalletBatch(); return; }
+ 
+      const boxWeight = Math.floor(Math.random() * 26) + 5;
+     
+      // CALCULA A CAMADA ATUAL CORRETAMENTE (FinalLayer)
+      const finalLayer = Math.floor(boxesInCurrentPallet / boxesPerLayer);
+     
+      const heightInUnits = (finalLayer + 1) * currentBoxDim.h;
+      currentPalletHeightMeters = (heightInUnits * 0.1);
+      const nextBoxTotalHeight = PALLET_SURFACE_Y + heightInUnits;
+      const nextPalletWeight = currentPalletWeight + boxWeight;
+ 
+      // Verifica se a próxima caixa excede os limites máximos de altura ou peso
+      if (nextBoxTotalHeight > maxHeight * 10 || nextPalletWeight > maxWeight) { finishPalletBatch(); return; }
+ 
+      isAnimating = true;
+ 
+      // ÍNDICE DENTRO DA CAMADA (CORRIGIDO OS PARÊNTESES DE PRECEDÊNCIA)
+      const indexInLayer = (boxesInCurrentPallet % boxesPerLayer);
+      const boxData = currentLayerLayout[indexInLayer];
+ 
+      boxesInCurrentPallet++;
+      currentPalletWeight += boxWeight;
+ 
+      const dropX = -(palletDim.l / 2) + boxData.cx;
+      const dropY = PALLET_SURFACE_Y + (finalLayer * currentBoxDim.h) + (currentBoxDim.h / 2);
+      const dropZ = -(palletDim.w / 2) + boxData.cz;
+ 
+      const actualL = boxData.rotated ? currentBoxDim.w : currentBoxDim.l;
+      const actualW = boxData.rotated ? currentBoxDim.l : currentBoxDim.w;
+      const mats = [
+        new THREE.MeshStandardMaterial({ map: texturesBox.side }), new THREE.MeshStandardMaterial({ map: texturesBox.side }),
+        new THREE.MeshStandardMaterial({ map: texturesBox.top }), new THREE.MeshStandardMaterial({ map: texturesBox.bottom }),
+        new THREE.MeshStandardMaterial({ map: texturesBox.side }), new THREE.MeshStandardMaterial({ map: texturesBox.side })
+      ];
+     
+      const boxMesh = new THREE.Mesh(new THREE.BoxGeometry(actualL, currentBoxDim.h, actualW), mats);
+      const conveyorBoxY = CONVEYOR_HEIGHT + (currentBoxDim.h / 2);
+      boxMesh.position.set(CONVEYOR_POS.x, conveyorBoxY, CONVEYOR_POS.z);
+      boxMesh.castShadow = true; boxMesh.receiveShadow = true;
+      activeBatchGroup.add(boxMesh);
+ 
+      let isAttached = false;
+      let pickupTargetY = CONVEYOR_HEIGHT + currentBoxDim.h;
+     
+      let currentPalletTopY = PALLET_SURFACE_Y + (finalLayer * currentBoxDim.h);
+      let safeHeight = Math.max(pickupTargetY + 8, currentPalletTopY + currentBoxDim.h + 8);
+ 
+      new TWEEN.Tween(effectorProxy)
+        .to({x: CONVEYOR_POS.x, y: safeHeight, z: CONVEYOR_POS.z}, 300)
+        .easing(TWEEN.Easing.Quadratic.Out)
+        .onUpdate(() => { applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z); if(isAttached) updateBoxPosition(); })
+        .onComplete(() => {
+            new TWEEN.Tween(effectorProxy)
+                .to({y: pickupTargetY}, 300)
+                .easing(TWEEN.Easing.Cubic.Out)
+                .onUpdate(() => applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z))
+                .onComplete(() => {
+                    isAttached = true;
+                    new TWEEN.Tween(effectorProxy)
+                        .to({y: safeHeight}, 350)
+                        .easing(TWEEN.Easing.Cubic.In)
+                        .onUpdate(() => { applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z); updateBoxPosition(); })
+                        .onComplete(() => {
+                            new TWEEN.Tween(effectorProxy)
+                                .to({x: dropX, z: dropZ}, 600)
+                                .easing(TWEEN.Easing.Quadratic.InOut)
+                                .onUpdate(() => { applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z); updateBoxPosition(); })
+                                .onComplete(() => {
+                                    let releaseTargetY = dropY + (currentBoxDim.h / 2);
+                                    new TWEEN.Tween(effectorProxy)
+                                        .to({y: releaseTargetY}, 350)
+                                        .easing(TWEEN.Easing.Cubic.Out)
+                                        .onUpdate(() => { applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z); updateBoxPosition(); })
+                                        .onComplete(() => {
+                                            isAttached = false;
+                                            boxMesh.position.set(dropX, dropY, dropZ);
+                                            document.getElementById('currentBoxes').innerText = boxesInCurrentPallet;
+                                            document.getElementById('currentWeight').innerText = currentPalletWeight + " kg";
+                                            document.getElementById('currentHeight').innerText = currentPalletHeightMeters.toFixed(2) + " m";
+                                            updateEstimates();
+ 
+                                            new TWEEN.Tween(effectorProxy)
+                                                .to({y: safeHeight}, 300)
+                                                .easing(TWEEN.Easing.Quadratic.Out)
+                                                .onUpdate(() => applyIK(effectorProxy.x, effectorProxy.y, effectorProxy.z))
+                                                .onComplete(() => {
+                                                    isAnimating = false;
+                                                    productionTimer = setTimeout(processNextBox, 100);
+                                                }).start();
+                                        }).start();
+                                }).start();
+                        }).start();
+                }).start();
+        }).start();
+ 
+      function updateBoxPosition() {
+          let effWorld = new THREE.Vector3();
+          effector.getWorldPosition(effWorld);
+          boxMesh.position.x = effWorld.x;
+          boxMesh.position.y = effWorld.y - (currentBoxDim.h / 2) - 0.1;
+          boxMesh.position.z = effWorld.z;
+      }
+    }
+ 
+    function finishPalletBatch() {
+      isAnimating = false;
+      const batchDiv = document.createElement('div');
+      batchDiv.className = "bg-slate-700/50 p-2 rounded border border-slate-600";
+      batchDiv.innerHTML = `<span class="text-white font-bold block">Lote #${currentPalletIndex + 1}</span>Caixas: ${boxesInCurrentPallet} | Peso: ${currentPalletWeight}kg | Altura: ${currentPalletHeightMeters.toFixed(2)}m <br>Ocupação: ${currentLayerLayout.length} caixas/camada`;
+      document.getElementById('readyBatches').prepend(batchDiv);
+      while(activeBatchGroup.children.length > 0){ activeBatchGroup.remove(activeBatchGroup.children[0]); }
+      currentPalletIndex++; boxesInCurrentPallet = 0; currentPalletWeight = 0; currentPalletHeightMeters = 0;
+      updateEstimates(); createPalletBase(); generateRandomBoxSize();
+      productionTimer = setTimeout(processNextBox, 1500);
+    }
+ 
+    function startProduction() {
+      if (isProducing) return;
+      isProducing = true;
+      const pType = document.getElementById('palletType').value;
+      palletDim = pType === 'PBR' ? { l: 12, w: 10 } : { l: 12, w: 8 };
+      maxHeight = parseFloat(document.getElementById('maxHeight').value); maxWeight = parseFloat(document.getElementById('maxWeight').value);
+      ['btnStart', 'maxHeight', 'maxWeight', 'palletType'].forEach(id => document.getElementById(id).disabled = true);
+      document.getElementById('btnStop').disabled = false;
+      if (boxesInCurrentPallet === 0 && currentPalletIndex === 0) {
+        while(activeBatchGroup.children.length > 0) activeBatchGroup.remove(activeBatchGroup.children[0]);
+        createPalletBase(); generateRandomBoxSize();
+      }
+      processNextBox();
+    }
+ 
+    function stopProduction() {
+      isProducing = false; isAnimating = false; clearTimeout(productionTimer);
+      ['maxHeight', 'maxWeight', 'palletType', 'btnStart'].forEach(id => document.getElementById(id).disabled = false);
+      document.getElementById('btnStop').disabled = true;
+    }
+  </script>
+</body>
+</html>
+ 
+
+ 
